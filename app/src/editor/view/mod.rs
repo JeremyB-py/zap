@@ -268,6 +268,12 @@ pub fn init(ctx: &mut AppContext) {
             crate::t!("keybinding-desc-editor-paste"),
             id!("EditorView") & !id!("IMEOpen"),
         ),
+        #[cfg(target_os = "linux")]
+        FixedBinding::new(
+            "ctrl-v",
+            EditorAction::Paste,
+            id!("EditorView") & !id!("IMEOpen"),
+        ),
         FixedBinding::new(
             "ctrl-y",
             EditorAction::Yank,
