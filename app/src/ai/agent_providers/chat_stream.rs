@@ -2815,6 +2815,17 @@ fn normalize_endpoint_url(api_type: AgentProviderApiType, base_url: &str) -> Str
         }
     };
 
+    // Ollama 原生 API 在 host 根 `/api/chat`,没有 `/v1/` 前缀。历史 default_base_url
+    // 误填 `/v1/` 或用户从 OpenAI 习惯带入的 `/v1` 在这里剥掉,避免拼成 `/v1/api/chat`。
+    if api_type == AgentProviderApiType::Ollama {
+        let path = parsed.path().trim_end_matches('/');
+        if path.is_empty() || path == "/" || path == "/v1" {
+            let mut normalized = parsed.clone();
+            normalized.set_path("/");
+            return normalized.to_string();
+        }
+    }
+
     // path == "/" 或为空 → 用户只填了 host,自动补上 api_type 默认版本路径段。
     if parsed.path() == "/" || parsed.path().is_empty() {
         // 从 default_base_url 抽 path 部分(如 "/v1/" / "/v1beta/" / "/")。

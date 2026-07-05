@@ -17,7 +17,9 @@ use crate::{
     settings_view::mcp_servers_page::MCPServersSettingsPageEvent,
     terminal::{model::blockgrid::BlockGrid, SizeInfo},
     ui_components::icons,
-    util::bindings::{keybinding_name_to_display_string, BindingGroup, CustomAction},
+    util::bindings::{
+        custom_tag_to_keystroke, keybinding_name_to_display_string, BindingGroup, CustomAction,
+    },
     view_components::ToastFlavor,
     workspace::WorkspaceAction,
     GlobalResourceHandlesProvider,
@@ -197,7 +199,6 @@ pub enum SettingsSection {
     // Zap Wave 7-3:`CloudEnvironments` 随 ambient-agent UI 子系统物理删。
 }
 
-use crate::util::bindings::custom_tag_to_keystroke;
 use std::fmt::{self, Display};
 
 impl Display for SettingsSection {
@@ -779,6 +780,9 @@ pub enum SettingsAction {
     ToggleMaximizePane,
     Close,
     OpenContextMenu(Vector2F),
+    EditorCut,
+    EditorCopy,
+    EditorPaste,
     FocusSelf,
     Up,
     Down,
@@ -1378,8 +1382,84 @@ impl SettingsView {
         }
     }
 
+    fn focused_editor(&self, ctx: &ViewContext<Self>) -> Option<ViewHandle<EditorView>> {
+        let window_id = ctx.window_id();
+        let focused_id = ctx.focused_view_id(window_id)?;
+        if ctx.view_name(window_id, focused_id) != Some(EditorView::ui_name()) {
+            return None;
+        }
+        ctx.view_with_id(window_id, focused_id)
+    }
+
+    fn editor_context_menu_items(
+        &self,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<Vec<MenuItem<SettingsAction>>> {
+        let editor = self.focused_editor(ctx)?;
+        let (has_selection, can_edit) = editor.read(ctx, |editor, ctx| {
+            (
+                !editor.selected_text(ctx).is_empty(),
+                editor.can_edit(ctx),
+            )
+        });
+
+        let mut items = Vec::new();
+        if has_selection && can_edit {
+            items.push(
+                MenuItemFields::new(crate::t!("common-cut"))
+                    .with_on_select_action(SettingsAction::EditorCut)
+                    .with_key_shortcut_label(
+                        custom_tag_to_keystroke(CustomAction::Cut.into())
+                            .map(|keystroke| keystroke.displayed()),
+                    )
+                    .into_item(),
+            );
+        }
+        if has_selection {
+            items.push(
+                MenuItemFields::new(crate::t!("common-copy"))
+                    .with_on_select_action(SettingsAction::EditorCopy)
+                    .with_key_shortcut_label(
+                        custom_tag_to_keystroke(CustomAction::Copy.into())
+                            .map(|keystroke| keystroke.displayed()),
+                    )
+                    .into_item(),
+            );
+        }
+        if can_edit {
+            items.push(
+                MenuItemFields::new(crate::t!("common-paste"))
+                    .with_on_select_action(SettingsAction::EditorPaste)
+                    .with_key_shortcut_label(
+                        custom_tag_to_keystroke(CustomAction::Paste.into())
+                            .map(|keystroke| keystroke.displayed()),
+                    )
+                    .into_item(),
+            );
+        }
+
+        if items.is_empty() {
+            None
+        } else {
+            Some(items)
+        }
+    }
+
     fn context_menu_items(&self, ctx: &mut ViewContext<Self>) -> Vec<MenuItem<SettingsAction>> {
         let mut items = vec![];
+
+        if let Some(editor_items) = self.editor_context_menu_items(ctx) {
+            items.extend(editor_items);
+            if ContextFlag::CreateNewSession.is_enabled()
+                || self
+                    .focus_handle
+                    .as_ref()
+                    .map(|h| h.split_pane_state(ctx).is_in_split_pane())
+                    .unwrap_or(false)
+            {
+                items.push(MenuItem::Separator);
+            }
+        }
 
         if ContextFlag::CreateNewSession.is_enabled() {
             items.extend(vec![
@@ -2309,6 +2389,21 @@ impl TypedActionView for SettingsView {
                     ctx.notify();
                 });
                 ctx.notify();
+            }
+            SettingsAction::EditorCut => {
+                if let Some(editor) = self.focused_editor(ctx) {
+                    editor.update(ctx, |editor, ctx| editor.cut(ctx));
+                }
+            }
+            SettingsAction::EditorCopy => {
+                if let Some(editor) = self.focused_editor(ctx) {
+                    editor.update(ctx, |editor, ctx| editor.copy(ctx));
+                }
+            }
+            SettingsAction::EditorPaste => {
+                if let Some(editor) = self.focused_editor(ctx) {
+                    editor.update(ctx, |editor, ctx| editor.paste(ctx));
+                }
             }
             SettingsAction::FocusSelf => ctx.emit(SettingsViewEvent::Pane(PaneEvent::FocusSelf)),
             SettingsAction::Up => self.key_up(ctx),
