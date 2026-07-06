@@ -1841,7 +1841,7 @@ fn log_chat_request_details(
         "[byop-diag] request summary: adapter={:?} model={} system_len={} \
          system_in_messages_head={} messages={} tools={} tool_names={:?} \
          previous_response_id_present={} store={:?} system_snippet={:?}",
-        adapter_kind_for(api_type),
+        effective_adapter_kind_for(api_type, model_id),
         model_id,
         chat_req.system.as_deref().map(str::len).unwrap_or(0),
         system_in_head,
@@ -2802,6 +2802,26 @@ fn adapter_kind_for(api_type: AgentProviderApiType) -> AdapterKind {
     }
 }
 
+/// OpenAI 官方 gpt-5 / codex / pro 系在带 function tools + reasoning_effort 时
+/// 只接受 `/v1/responses`,`/v1/chat/completions` 会 400。
+fn openai_model_requires_responses_api(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    id.starts_with("gpt-5")
+        || (id.starts_with("gpt") && (id.contains("codex") || id.contains("pro")))
+        || id.starts_with("codex")
+}
+
+/// 按用户配置的 `api_type` 与 model id 解析实际应使用的 genai adapter。
+/// 用户把 provider 留默认 `OpenAi` 时,gpt-5.4 等模型自动升级到 OpenAIResp。
+fn effective_adapter_kind_for(api_type: AgentProviderApiType, model_id: &str) -> AdapterKind {
+    let base = adapter_kind_for(api_type);
+    if api_type == AgentProviderApiType::OpenAi && openai_model_requires_responses_api(model_id) {
+        AdapterKind::OpenAIResp
+    } else {
+        base
+    }
+}
+
 /// 规范化用户填写的 `base_url`,产出供 genai adapter 拼接 service path 的 endpoint URL。
 ///
 /// genai 0.6.x 所有 adapter 都假设 endpoint 以 `/` 结尾、且已经包含版本路径段:
@@ -2866,15 +2886,26 @@ pub(super) fn build_client(
     base_url: String,
     api_key: String,
 ) -> Client {
-    let adapter_kind = adapter_kind_for(api_type);
     let endpoint_url = normalize_endpoint_url(api_type, &base_url);
-    log::info!("[byop] build_client: adapter={adapter_kind:?} endpoint_url={endpoint_url}");
+    log::info!(
+        "[byop] build_client: api_type={api_type:?} endpoint_url={endpoint_url}"
+    );
     let key_for_resolver = api_key.clone();
     let resolver = ServiceTargetResolver::from_resolver_fn(
         move |service_target: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
             let ServiceTarget { model, .. } = service_target;
             let endpoint = Endpoint::from_owned(endpoint_url.clone());
             let auth = AuthData::from_single(key_for_resolver.clone());
+            let model_name = model.model_name.as_str();
+            let adapter_kind = effective_adapter_kind_for(api_type, model_name);
+            if api_type == AgentProviderApiType::OpenAi
+                && adapter_kind == AdapterKind::OpenAIResp
+            {
+                log::info!(
+                    "[byop] auto-upgrade OpenAi → OpenAIResp for model={model_name} \
+                     (function tools + reasoning_effort require /v1/responses)"
+                );
+            }
             // 用我们指定的 AdapterKind 覆盖 genai 的"按模型名"识别结果,
             // 但保留 model_name 以便上游服务正确寻址模型。
             let model = ModelIden::new(adapter_kind, model.model_name);
@@ -5559,6 +5590,36 @@ mod build_chat_options_off_tests {
         // gpt-4o 不在 reasoning 名单,Off 也跳过
         let o = opts(AgentProviderApiType::OpenAi, "gpt-4o", R::Off);
         assert!(o.reasoning_effort.is_none());
+    }
+}
+
+#[cfg(test)]
+mod adapter_routing_tests {
+    use super::*;
+    use genai::adapter::AdapterKind;
+
+    #[test]
+    fn openai_gpt54_auto_upgrades_to_responses_api() {
+        assert_eq!(
+            effective_adapter_kind_for(AgentProviderApiType::OpenAi, "gpt-5.4"),
+            AdapterKind::OpenAIResp
+        );
+    }
+
+    #[test]
+    fn openai_gpt4o_stays_on_chat_completions() {
+        assert_eq!(
+            effective_adapter_kind_for(AgentProviderApiType::OpenAi, "gpt-4o"),
+            AdapterKind::OpenAI
+        );
+    }
+
+    #[test]
+    fn openai_resp_api_type_unchanged() {
+        assert_eq!(
+            effective_adapter_kind_for(AgentProviderApiType::OpenAiResp, "gpt-5.4"),
+            AdapterKind::OpenAIResp
+        );
     }
 }
 
